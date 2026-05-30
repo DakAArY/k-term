@@ -1,1 +1,16 @@
 /target
+**/*.rs.bk
+
+# Entornos locales y variables
+.env
+
+# Editores de texto 
+*.swp
+*.swo
+.helix/
+.vscode/
+.idea/
+
+# Dependencias offline
+vendor/
+.cargo/config.toml
