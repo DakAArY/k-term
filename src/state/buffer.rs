@@ -3,51 +3,120 @@ use vte::Perform;
 #[derive(Clone, Copy)]
 pub struct Cell {
     pub c: char,
+    pub fg: [u8; 3],
+    pub bg: [u8; 3],
+}
+
+const DEFAULT_FG: [u8; 3] = [220, 220, 220];
+const DEFAULT_BG: [u8; 3] = [18, 18, 18];
+
+fn color_256_to_rgb(color: u16) -> [u8; 3] {
+    match color {
+        0..=15 => [200, 200, 200],
+        16..=231 => {
+            let n = color - 16;
+            let r = if (n / 36) == 0 { 0 } else { (n / 36) * 40 + 55 };
+            let g = if ((n % 36) / 6) == 0 { 0 } else { ((n % 36) / 6) * 40 + 55 };
+            let b = if (n % 6) == 0 { 0 } else { (n % 6) * 40 + 55 };
+            [r as u8, g as u8, b as u8]
+        }
+        232..=255 => {
+            let gray = (color - 232) * 10 + 8;
+            [gray as u8, gray as u8, gray as u8]
+        }
+        _ => [255, 255, 255],
+    }
+}
+
+pub struct Screen {
+    pub grid: Vec<Vec<Cell>>,
+    pub cursor_x: usize,
+    pub cursor_y: usize,
+}
+
+impl Screen {
+    pub fn new(cols: usize, rows: usize) -> Self {
+        let empty_cell = Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG };
+        Self {
+            grid: vec![vec![empty_cell; cols]; rows],
+            cursor_x: 0,
+            cursor_y: 0,
+        }
+    }
+
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        self.grid.resize(new_rows, vec![Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG }; new_cols]);
+
+        for row in &mut self.grid {
+            row.resize(new_cols, Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG });
+        }
+
+        self.cursor_x = self.cursor_x.min(new_cols.saturating_sub(1));
+        self.cursor_y = self.cursor_y.min(new_rows.saturating_sub(1));
+    }
+
+    fn scroll_up(&mut self, cols: usize) {
+        self.grid.remove(0);
+        self.grid.push(vec![Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG }; cols]);
+    }
 }
 
 pub struct TerminalState {
-    pub cursor_x: usize,
-    pub cursor_y: usize,
     pub cols: usize,
     pub rows: usize,
-    pub grid: Vec<Vec<Cell>>,
+    pub primary: Screen,  
+    pub alt: Screen,    
+    pub use_alt_screen: bool, 
     pub dirty: bool,
+    pub current_fg: [u8; 3],
+    pub current_bg: [u8; 3],
 }
 
 impl TerminalState {
     pub fn new(cols: usize, rows: usize) -> Self {
-        let empty_cell = Cell { c: ' ' };
-        let grid = vec![vec![empty_cell; cols]; rows];
-
         Self { 
-            cursor_x: 0,
-            cursor_y: 0,
             cols,
             rows,
-            grid,
+            primary: Screen::new(cols, rows),
+            alt: Screen::new(cols, rows),
+            use_alt_screen: false,
             dirty: true,
+            current_fg: DEFAULT_FG,
+            current_bg: DEFAULT_BG,
         }
     }
 
-    fn scroll_up(&mut self) {
-        self.grid.remove(0);
-        self.grid.push(vec![Cell { c: ' ' }; self.cols]);
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
+        self.cols = new_cols;
+        self.rows = new_rows;
+        self.primary.resize(new_cols, new_rows);
+        self.alt.resize(new_cols, new_rows);
+        self.dirty = true;
     }
 }
 
 impl Perform for TerminalState {
     fn print(&mut self, c: char) {
-        if self.cursor_y < self.rows && self.cursor_x < self.cols {
-            self.grid[self.cursor_y][self.cursor_x].c = c;
-            self.cursor_x += 1;
+        let cols = self.cols;
+        let rows = self.rows;
+        let fg = self.current_fg;
+        let bg = self.current_bg;
+        
+        let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
+
+        if screen.cursor_y < rows && screen.cursor_x < cols {
+            screen.grid[screen.cursor_y][screen.cursor_x].c = c;
+            screen.grid[screen.cursor_y][screen.cursor_x].fg = fg;
+            screen.grid[screen.cursor_y][screen.cursor_x].bg = bg;
+            screen.cursor_x += 1;
         }
 
-        if self.cursor_x >= self.cols {
-            self.cursor_x = 0;
-            if self.cursor_y < self.rows - 1 {
-                self.cursor_y += 1;
+        if screen.cursor_x >= cols {
+            screen.cursor_x = 0;
+            if screen.cursor_y < rows - 1 {
+                screen.cursor_y += 1;
             } else {
-                self.scroll_up();
+                screen.scroll_up(cols);
             }
         }
 
@@ -55,102 +124,178 @@ impl Perform for TerminalState {
     }
 
     fn execute(&mut self, byte: u8) {
-        match byte {
-            10 => {
-                if self.cursor_y < self.rows - 1 {
-                    self.cursor_y += 1;
-                } else {
-                    self.scroll_up();
-                }
-            }
-            13 => {
-                self.cursor_x = 0;
-            }
-            8 => {
-                if self.cursor_x > 0 {
-                    self.cursor_x -= 1;
-                }
-            }
-            7 => { /* ignore bell */ }
-            127 => {/*ignorar del visual*/}
-            _ => {
-                println!("[VTE - Execute] Byte no manejado: {:#04x}", byte);
-            }
-        }
+        let rows = self.rows;
+        let cols = self.cols;
+        let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
 
+        match byte {
+            10 => { // \n
+                if screen.cursor_y < rows - 1 {
+                    screen.cursor_y += 1;
+                } else {
+                    screen.scroll_up(cols);
+                }
+            }
+            13 => screen.cursor_x = 0, // \r
+            8 => { // \b
+                if screen.cursor_x > 0 {
+                    screen.cursor_x -= 1;
+                }
+            }
+            7 | 127 => { /* ignorar */ }
+            _ => {}
+        }
         self.dirty = true;
     }
 
     fn csi_dispatch(
             &mut self,
             params: &consts::Params,
-            _intermediates: &[u8],
+            intermediates: &[u8],
             _ignore: bool,
             action: char,
         ) {
         let mut args = params.iter().map(|param| param[0]);
+        let is_dec_private = intermediates.get(0) == Some(&b'?');
+
+        if is_dec_private {
+            match action {
+                'h' => {
+                    for mode in args {
+                        if mode == 1049 {
+                            self.use_alt_screen = true;
+                            self.alt = Screen::new(self.cols, self.rows);
+                        }
+                    }
+                    self.dirty = true;
+                    return;
+                }
+                'l' => {
+                    for mode in args {
+                        if mode == 1049 {
+                            self.use_alt_screen = false;
+                        }
+                    }
+                    self.dirty = true;
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        let cols = self.cols;
+        let rows = self.rows;
+        let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
 
         match action {
             'K' => {
-                // Erase in Line (Borrar en la línea actual)
                 let mode = args.next().unwrap_or(0);
                 match mode {
-                    0 => {
-                        // Borrar desde el cursor hasta el final
-                        for x in self.cursor_x..self.cols {
-                            self.grid[self.cursor_y][x].c = ' ';
-                        }
-                    }
-                    1 => {
-                        // Borrar desde el inicio hasta el cursor
-                        for x in 0..=self.cursor_x {
-                            self.grid[self.cursor_y][x].c = ' ';
-                        }
-                    }
-                    2 => {
-                        // Borrar toda la línea
-                        for x in 0..self.cols {
-                            self.grid[self.cursor_y][x].c = ' ';
-                        }
-                    }
+                    0 => for x in screen.cursor_x..cols { screen.grid[screen.cursor_y][x].c = ' '; },
+                    1 => for x in 0..=screen.cursor_x { screen.grid[screen.cursor_y][x].c = ' '; },
+                    2 => for x in 0..cols { screen.grid[screen.cursor_y][x].c = ' '; },
                     _ => {}
                 }
             }
             'J' => {
-                // Erase in Display (Limpiar pantalla, ej. al usar comando 'clear')
                 let mode = args.next().unwrap_or(0);
                 if mode == 2 || mode == 3 {
-                    for y in 0..self.rows {
-                        for x in 0..self.cols {
-                            self.grid[y][x].c = ' ';
+                    for y in 0..rows {
+                        for x in 0..cols {
+                            screen.grid[y][x].c = ' ';
                         }
                     }
-                    self.cursor_x = 0;
-                    self.cursor_y = 0;
+                    screen.cursor_x = 0;
+                    screen.cursor_y = 0;
                 }
             }
             'C' => {
-                // Cursor Forward (Flecha derecha)
                 let n = args.next().unwrap_or(1).max(1) as usize;
-                self.cursor_x = (self.cursor_x + n).min(self.cols - 1);
+                screen.cursor_x = (screen.cursor_x + n).min(cols - 1);
             }
             'D' => {
-                // Cursor Backward (Flecha izquierda)
                 let n = args.next().unwrap_or(1).max(1) as usize;
-                self.cursor_x = self.cursor_x.saturating_sub(n);
+                screen.cursor_x = screen.cursor_x.saturating_sub(n);
             }
             'H' | 'f' => {
-                // Cursor Position (Mover a coordenadas exactas)
                 let row = args.next().unwrap_or(1).max(1) as usize;
                 let col = args.next().unwrap_or(1).max(1) as usize;
-                self.cursor_y = (row - 1).min(self.rows - 1);
-                self.cursor_x = (col - 1).min(self.cols - 1);
+                screen.cursor_y = (row - 1).min(rows - 1);
+                screen.cursor_x = (col - 1).min(cols - 1);
             }
-            _ => {
-                // Comandos de color ('m') y otros llegarán aquí después
+            'm' => {
+                let params_vec: Vec<u16> = args.collect();
+                if params_vec.is_empty() {
+                    self.current_fg = DEFAULT_FG;
+                    self.current_bg = DEFAULT_BG;
+                } else {
+                    let mut i = 0;
+                    while i < params_vec.len() {
+                        let param = params_vec[i];
+                        match param {
+                            0 => {
+                                self.current_fg = DEFAULT_FG;
+                                self.current_bg = DEFAULT_BG;
+                            }
+                            30 => self.current_fg = [0, 0, 0],
+                            31 => self.current_fg = [205, 49, 49],
+                            32 => self.current_fg = [13, 188, 121],
+                            33 => self.current_fg = [229, 229, 16],
+                            34 => self.current_fg = [36, 114, 200],
+                            35 => self.current_fg = [188, 63, 188],
+                            36 => self.current_fg = [17, 168, 205],
+                            37 => self.current_fg = [229, 229, 229],
+                            90 => self.current_fg = [102, 102, 102],
+                            91 => self.current_fg = [241, 76, 76],
+                            92 => self.current_fg = [35, 209, 139],
+                            93 => self.current_fg = [245, 245, 67],
+                            94 => self.current_fg = [59, 142, 234],
+                            95 => self.current_fg = [214, 112, 214],
+                            96 => self.current_fg = [41, 184, 219],
+                            97 => self.current_fg = [229, 229, 229],
+                            40 => self.current_bg = [0, 0, 0],
+                            41 => self.current_bg = [205, 49, 49],
+                            42 => self.current_bg = [13, 188, 121],
+                            43 => self.current_bg = [229, 229, 16],
+                            44 => self.current_bg = [36, 114, 200],
+                            45 => self.current_bg = [188, 63, 188],
+                            46 => self.current_bg = [17, 168, 205],
+                            47 => self.current_bg = [229, 229, 229],
+                            100 => self.current_bg = [102, 102, 102],
+                            101 => self.current_bg = [241, 76, 76],
+                            102 => self.current_bg = [35, 209, 139],
+                            103 => self.current_bg = [245, 245, 67],
+                            104 => self.current_bg = [59, 142, 234],
+                            105 => self.current_bg = [214, 112, 214],
+                            106 => self.current_bg = [41, 184, 219],
+                            107 => self.current_bg = [229, 229, 229],
+                            38 => {
+                                if i + 2 < params_vec.len() && params_vec[i+1] == 5 {
+                                    self.current_fg = color_256_to_rgb(params_vec[i+2]);
+                                    i += 2; 
+                                } else if i + 4 < params_vec.len() && params_vec[i+1] == 2 {
+                                    self.current_fg = [params_vec[i+2] as u8, params_vec[i+3] as u8, params_vec[i+4] as u8];
+                                    i += 4;
+                                }
+                            }
+                            48 => {
+                                if i + 2 < params_vec.len() && params_vec[i+1] == 5 {
+                                    self.current_bg = color_256_to_rgb(params_vec[i+2]);
+                                    i += 2;
+                                } else if i + 4 < params_vec.len() && params_vec[i+1] == 2 {
+                                    self.current_bg = [params_vec[i+2] as u8, params_vec[i+3] as u8, params_vec[i+4] as u8];
+                                    i += 4;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                }
             }
+            _ => {}
         }
-        self.dirty = true; // Avisamos al motor gráfico que repinte
+        self.dirty = true;
     }
 
     fn hook(&mut self, _params: &consts::Params, _intermediates: &[u8], _ignore: bool, _action: char) {}
