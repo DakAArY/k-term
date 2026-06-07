@@ -1,14 +1,13 @@
-use portable_pty::{CommandBuilder, native_pty_system, PtySize};
+use portable_pty::{CommandBuilder, native_pty_system, PtySize, MasterPty};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use anyhow::Result;
 
-use crate::pty;
-
 pub struct PtyProcess {
     pub receiver: Receiver<Vec<u8>>,
     pub writer: Box<dyn Write + Send>,
+    pub master: Box<dyn MasterPty + Send>,
 }
 
 pub fn spawn_interactive_shell() -> Result<PtyProcess> {
@@ -48,5 +47,5 @@ pub fn spawn_interactive_shell() -> Result<PtyProcess> {
         }
     });
 
-    Ok(PtyProcess { receiver: rx, writer })
+    Ok(PtyProcess { receiver: rx, writer, master: pty_pair.master })
 }
