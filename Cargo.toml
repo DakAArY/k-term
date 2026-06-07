@@ -19,3 +19,4 @@ anyhow = "1.0"
 pollster = "0.3"
 
 glyphon = "0.5"
+bytemuck = { version = "1.25.0", features = ["derive"] }
