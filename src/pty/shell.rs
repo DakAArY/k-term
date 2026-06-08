@@ -1,8 +1,8 @@
-use portable_pty::{CommandBuilder, native_pty_system, PtySize, MasterPty};
+use anyhow::Result;
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
-use anyhow::Result;
 
 pub struct PtyProcess {
     pub receiver: Receiver<Vec<u8>>,
@@ -13,7 +13,7 @@ pub struct PtyProcess {
 pub fn spawn_interactive_shell() -> Result<PtyProcess> {
     let pty_system = native_pty_system();
 
-    let pty_pair = pty_system.openpty(PtySize { 
+    let pty_pair = pty_system.openpty(PtySize {
         rows: 24,
         cols: 80,
         pixel_width: 0,
@@ -28,7 +28,6 @@ pub fn spawn_interactive_shell() -> Result<PtyProcess> {
 
     let mut reader = pty_pair.master.try_clone_reader()?;
     let writer = pty_pair.master.take_writer()?;
-
 
     let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
 
@@ -47,5 +46,9 @@ pub fn spawn_interactive_shell() -> Result<PtyProcess> {
         }
     });
 
-    Ok(PtyProcess { receiver: rx, writer, master: pty_pair.master })
+    Ok(PtyProcess {
+        receiver: rx,
+        writer,
+        master: pty_pair.master,
+    })
 }

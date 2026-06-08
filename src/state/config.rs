@@ -1,8 +1,5 @@
-use std::fs;
-
 use serde::{Deserialize, Serialize};
-
-
+use std::fs;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct KtermConfig {
@@ -19,7 +16,7 @@ pub struct FontConfig {
 
 impl Default for FontConfig {
     fn default() -> Self {
-        Self { 
+        Self {
             family: String::from("FiraCode Nerd Font"),
             size: 16.0,
         }
@@ -34,7 +31,7 @@ pub struct ColorConfig {
 
 impl Default for ColorConfig {
     fn default() -> Self {
-        Self { 
+        Self {
             background: [18, 18, 18],
             foreground: [220, 220, 220],
         }
@@ -43,7 +40,7 @@ impl Default for ColorConfig {
 
 impl Default for KtermConfig {
     fn default() -> Self {
-        Self { 
+        Self {
             font: FontConfig::default(),
             colors: ColorConfig::default(),
         }
@@ -54,36 +51,27 @@ impl KtermConfig {
     pub fn load() -> Self {
         let mut config_path = match dirs::config_dir() {
             Some(path) => path,
-            None => {
-                eprintln!("[K-Term] No se pudo determinar el directorio de configuracion. Usando defaults");
-                return Self::default();
-            }
+            None => return Self::default(),
         };
 
         config_path.push("kterm");
 
         if !config_path.exists() {
-            if let Err(e) = fs::create_dir_all(&config_path) {
-                eprintln!("[K-Term] Error creando directorio de configuracion: {}", e);
-            }
+            let _ = fs::create_dir_all(&config_path);
         }
 
         config_path.push("kterm.toml");
 
         if config_path.exists() {
             if let Ok(contents) = fs::read_to_string(&config_path) {
-                match toml::from_str(&contents) {
-                    Ok(config) => return config,
-                    Err(e) => eprintln!("[K-Term] Error parseando kterm.toml: {}. Usando defaults", e),
+                if let Ok(config) = toml::from_str(&contents) {
+                    return config;
                 }
             }
         } else {
-            println!("[K-Term] Creando archivo de configuracion por defecto en {:?}", config_path);
             let default_config = Self::default();
             if let Ok(toml_string) = toml::to_string_pretty(&default_config) {
-                if let Err(e) = fs::write(&config_path, toml_string) {
-                    eprintln!("[K-Term] No se pudo escribir el archivo de configuracion por defecto: {}", e);
-                }
+                let _ = fs::write(&config_path, toml_string);
             }
         }
         Self::default()

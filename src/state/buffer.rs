@@ -1,5 +1,4 @@
 use std::{isize, usize};
-
 use vte::Perform;
 
 #[derive(Clone, Copy)]
@@ -8,9 +7,6 @@ pub struct Cell {
     pub fg: [u8; 3],
     pub bg: [u8; 3],
 }
-
-const DEFAULT_FG: [u8; 3] = [220, 220, 220];
-const DEFAULT_BG: [u8; 3] = [18, 18, 18];
 
 fn color_256_to_rgb(color: u16) -> [u8; 3] {
     match color {
@@ -26,6 +22,27 @@ fn color_256_to_rgb(color: u16) -> [u8; 3] {
             let gray = (color - 232) * 10 + 8;
             [gray as u8, gray as u8, gray as u8]
         }
+        _ => [255, 255, 255],
+    }
+}
+
+fn basic_color(code: u16) -> [u8; 3] {
+    match code {
+        30 | 40 => [0, 0, 0],
+        31 | 41 => [205, 49, 49],
+        32 | 42 => [13, 188, 121],
+        33 | 43 => [229, 229, 16],
+        34 | 44 => [36, 114, 200],
+        35 | 45 => [188, 63, 188],
+        36 | 46 => [17, 168, 205],
+        37 | 47 | 97 | 107 => [229, 229, 229],
+        90 | 100 => [102, 102, 102],
+        91 | 101 => [241, 76, 76],
+        92 | 102 => [35, 209, 139],
+        93 | 103 => [245, 245, 67],
+        94 | 104 => [59, 142, 234],
+        95 | 105 => [214, 112, 214],
+        96 | 106 => [41, 184, 219],
         _ => [255, 255, 255],
     }
 }
@@ -52,11 +69,9 @@ impl Screen {
 
     pub fn resize(&mut self, new_cols: usize, new_rows: usize, def_fg: [u8; 3], def_bg: [u8; 3]) {
         self.grid.resize(new_rows, vec![Cell { c: ' ', fg: def_fg, bg: def_bg }; new_cols]);
-
         for row in &mut self.grid {
             row.resize(new_cols, Cell { c: ' ', fg: def_fg, bg: def_bg });
         }
-
         self.cursor_x = self.cursor_x.min(new_cols.saturating_sub(1));
         self.cursor_y = self.cursor_y.min(new_rows.saturating_sub(1));
     }
@@ -74,22 +89,31 @@ impl Screen {
 }
 
 pub struct TerminalState {
-    pub cols: usize, pub rows: usize,
-    pub primary: Screen,  pub alt: Screen,    
-    pub use_alt_screen: bool, pub dirty: bool,
-    pub current_fg: [u8; 3], pub current_bg: [u8; 3],
-    pub default_fg: [u8; 3], pub default_bg: [u8; 3],
+    pub cols: usize,
+    pub rows: usize,
+    pub primary: Screen,
+    pub alt: Screen,
+    pub use_alt_screen: bool,
+    pub dirty: bool,
+    pub current_fg: [u8; 3],
+    pub current_bg: [u8; 3],
+    pub default_fg: [u8; 3],
+    pub default_bg: [u8; 3],
 }
 
 impl TerminalState {
     pub fn new(cols: usize, rows: usize, def_fg: [u8; 3], def_bg: [u8; 3]) -> Self {
-        Self { 
-            cols, rows,
+        Self {
+            cols,
+            rows,
             primary: Screen::new(cols, rows, def_fg, def_bg),
             alt: Screen::new(cols, rows, def_fg, def_bg),
-            use_alt_screen: false, dirty: true,
-            current_fg: def_fg, current_bg: def_bg,
-            default_fg: def_fg, default_bg: def_bg
+            use_alt_screen: false,
+            dirty: true,
+            current_fg: def_fg,
+            current_bg: def_bg,
+            default_fg: def_fg,
+            default_bg: def_bg,
         }
     }
 
@@ -106,7 +130,6 @@ impl TerminalState {
 
         let max_offset = self.primary.scrollback.len();
         let current = self.primary.scroll_offset as isize;
-
         let new_offset = (current + lines).clamp(0, max_offset as isize) as usize;
 
         if new_offset != self.primary.scroll_offset {
@@ -121,6 +144,46 @@ impl TerminalState {
             self.dirty = true;
         }
     }
+
+    fn handle_sgr(&mut self, params: &[u16]) {
+        if params.is_empty() {
+            self.current_fg = self.default_fg;
+            self.current_bg = self.default_bg;
+            return;
+        }
+
+        let mut i = 0;
+        while i < params.len() {
+            match params[i] {
+                0 => {
+                    self.current_fg = self.default_fg;
+                    self.current_bg = self.default_bg;
+                }
+                30..=37 | 90..=97 => self.current_fg = basic_color(params[i]),
+                40..=47 | 100..=107 => self.current_bg = basic_color(params[i]),
+                38 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.current_fg = color_256_to_rgb(params[i + 2]);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.current_fg = [params[i + 2] as u8, params[i + 3] as u8, params[i + 4] as u8];
+                        i += 4;
+                    }
+                }
+                48 => {
+                    if i + 2 < params.len() && params[i + 1] == 5 {
+                        self.current_bg = color_256_to_rgb(params[i + 2]);
+                        i += 2;
+                    } else if i + 4 < params.len() && params[i + 1] == 2 {
+                        self.current_bg = [params[i + 2] as u8, params[i + 3] as u8, params[i + 4] as u8];
+                        i += 4;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+    }
 }
 
 impl Perform for TerminalState {
@@ -131,7 +194,7 @@ impl Perform for TerminalState {
         let rows = self.rows;
         let fg = self.current_fg;
         let bg = self.current_bg;
-        
+
         let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
 
         if screen.cursor_y < rows && screen.cursor_x < cols {
@@ -146,7 +209,7 @@ impl Perform for TerminalState {
             if screen.cursor_y < rows - 1 {
                 screen.cursor_y += 1;
             } else {
-                screen.scroll_up(cols, self. default_fg, self.default_bg);
+                screen.scroll_up(cols, self.default_fg, self.default_bg);
             }
         }
 
@@ -161,32 +224,26 @@ impl Perform for TerminalState {
         let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
 
         match byte {
-            10 => { // \n
+            10 => {
                 if screen.cursor_y < rows - 1 {
                     screen.cursor_y += 1;
                 } else {
                     screen.scroll_up(cols, self.default_fg, self.default_bg);
                 }
             }
-            13 => screen.cursor_x = 0, // \r
-            8 => { // \b
+            13 => screen.cursor_x = 0,
+            8 => {
                 if screen.cursor_x > 0 {
                     screen.cursor_x -= 1;
                 }
             }
-            7 | 127 => { /* ignorar */ }
+            7 | 127 => {}
             _ => {}
         }
         self.dirty = true;
     }
 
-    fn csi_dispatch(
-            &mut self,
-            params: &consts::Params,
-            intermediates: &[u8],
-            _ignore: bool,
-            action: char,
-        ) {
+    fn csi_dispatch(&mut self, params: &consts::Params, intermediates: &[u8], _ignore: bool, action: char) {
         let mut args = params.iter().map(|param| param[0]);
         let is_dec_private = intermediates.get(0) == Some(&b'?');
 
@@ -221,8 +278,7 @@ impl Perform for TerminalState {
 
         match action {
             'K' => {
-                let mode = args.next().unwrap_or(0);
-                match mode {
+                match args.next().unwrap_or(0) {
                     0 => for x in screen.cursor_x..cols { screen.grid[screen.cursor_y][x].c = ' '; },
                     1 => for x in 0..=screen.cursor_x { screen.grid[screen.cursor_y][x].c = ' '; },
                     2 => for x in 0..cols { screen.grid[screen.cursor_y][x].c = ' '; },
@@ -257,73 +313,7 @@ impl Perform for TerminalState {
             }
             'm' => {
                 let params_vec: Vec<u16> = args.collect();
-                if params_vec.is_empty() {
-                    self.current_fg = DEFAULT_FG;
-                    self.current_bg = DEFAULT_BG;
-                } else {
-                    let mut i = 0;
-                    while i < params_vec.len() {
-                        let param = params_vec[i];
-                        match param {
-                            0 => {
-                                self.current_fg = DEFAULT_FG;
-                                self.current_bg = DEFAULT_BG;
-                            }
-                            30 => self.current_fg = [0, 0, 0],
-                            31 => self.current_fg = [205, 49, 49],
-                            32 => self.current_fg = [13, 188, 121],
-                            33 => self.current_fg = [229, 229, 16],
-                            34 => self.current_fg = [36, 114, 200],
-                            35 => self.current_fg = [188, 63, 188],
-                            36 => self.current_fg = [17, 168, 205],
-                            37 => self.current_fg = [229, 229, 229],
-                            90 => self.current_fg = [102, 102, 102],
-                            91 => self.current_fg = [241, 76, 76],
-                            92 => self.current_fg = [35, 209, 139],
-                            93 => self.current_fg = [245, 245, 67],
-                            94 => self.current_fg = [59, 142, 234],
-                            95 => self.current_fg = [214, 112, 214],
-                            96 => self.current_fg = [41, 184, 219],
-                            97 => self.current_fg = [229, 229, 229],
-                            40 => self.current_bg = [0, 0, 0],
-                            41 => self.current_bg = [205, 49, 49],
-                            42 => self.current_bg = [13, 188, 121],
-                            43 => self.current_bg = [229, 229, 16],
-                            44 => self.current_bg = [36, 114, 200],
-                            45 => self.current_bg = [188, 63, 188],
-                            46 => self.current_bg = [17, 168, 205],
-                            47 => self.current_bg = [229, 229, 229],
-                            100 => self.current_bg = [102, 102, 102],
-                            101 => self.current_bg = [241, 76, 76],
-                            102 => self.current_bg = [35, 209, 139],
-                            103 => self.current_bg = [245, 245, 67],
-                            104 => self.current_bg = [59, 142, 234],
-                            105 => self.current_bg = [214, 112, 214],
-                            106 => self.current_bg = [41, 184, 219],
-                            107 => self.current_bg = [229, 229, 229],
-                            38 => {
-                                if i + 2 < params_vec.len() && params_vec[i+1] == 5 {
-                                    self.current_fg = color_256_to_rgb(params_vec[i+2]);
-                                    i += 2; 
-                                } else if i + 4 < params_vec.len() && params_vec[i+1] == 2 {
-                                    self.current_fg = [params_vec[i+2] as u8, params_vec[i+3] as u8, params_vec[i+4] as u8];
-                                    i += 4;
-                                }
-                            }
-                            48 => {
-                                if i + 2 < params_vec.len() && params_vec[i+1] == 5 {
-                                    self.current_bg = color_256_to_rgb(params_vec[i+2]);
-                                    i += 2;
-                                } else if i + 4 < params_vec.len() && params_vec[i+1] == 2 {
-                                    self.current_bg = [params_vec[i+2] as u8, params_vec[i+3] as u8, params_vec[i+4] as u8];
-                                    i += 4;
-                                }
-                            }
-                            _ => {}
-                        }
-                        i += 1;
-                    }
-                }
+                self.handle_sgr(&params_vec);
             }
             _ => {}
         }

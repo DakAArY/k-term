@@ -1,9 +1,9 @@
-use std::{cell, sync::{Arc, RwLock}};
+use std::sync::{Arc, RwLock};
 use winit::window::Window;
 use wgpu::util::DeviceExt;
 use glyphon::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, TextRenderer, Weight
+    TextAtlas, TextBounds, TextRenderer, Weight,
 };
 
 use crate::state::{buffer::TerminalState, config::KtermConfig};
@@ -65,7 +65,6 @@ pub struct RenderState<'a> {
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
     window: Arc<Window>,
-    
     font_system: FontSystem,
     swash_cache: SwashCache,
     text_atlas: TextAtlas,
@@ -74,7 +73,6 @@ pub struct RenderState<'a> {
     text_buffer: Buffer,
     screen_text: String,
     color_spans: Vec<(usize, usize, [u8; 3])>,
-
     bg_pipeline: wgpu::RenderPipeline,
     bg_vertices: Vec<BgVertex>,
     bg_buffer: Option<wgpu::Buffer>,
@@ -82,33 +80,42 @@ pub struct RenderState<'a> {
 }
 
 impl<'a> RenderState<'a> {
-    pub async fn new(window: Arc<Window>, terminal_state: Arc<RwLock<TerminalState>>, kterm_config: KtermConfig) -> Self {
+    pub async fn new(
+        window: Arc<Window>,
+        terminal_state: Arc<RwLock<TerminalState>>,
+        kterm_config: KtermConfig,
+    ) -> Self {
         let size = window.inner_size();
-
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(Arc::clone(&window)).unwrap();
 
-        let adapter = instance.request_adapter(
-            &wgpu::RequestAdapterOptions {
+        let adapter = instance
+            .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
                 compatible_surface: Some(&surface),
                 force_fallback_adapter: false,
-            },
-        ).await.unwrap();
+            })
+            .await
+            .unwrap();
 
-        let (device, queue) = adapter.request_device(
-            &wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                label: None,
-            },
-            None,
-        ).await.unwrap();
+        let (device, queue) = adapter
+            .request_device(
+                &wgpu::DeviceDescriptor {
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    label: None,
+                },
+                None,
+            )
+            .await
+            .unwrap();
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps.formats.iter()
+        let surface_format = surface_caps
+            .formats
+            .iter()
             .copied()
-            .find(|f| f.is_srgb())            
+            .find(|f| f.is_srgb())
             .unwrap_or(surface_caps.formats[0]);
 
         let config = wgpu::SurfaceConfiguration {
@@ -126,20 +133,22 @@ impl<'a> RenderState<'a> {
 
         let mut db = glyphon::fontdb::Database::new();
         db.load_system_fonts();
-        db.load_font_data(
-            include_bytes!("../../assets/FiraCodeNerdFont-Retina.ttf").to_vec()
-        );
+        db.load_font_data(include_bytes!("../../assets/FiraCodeNerdFont-Retina.ttf").to_vec());
         let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
 
         let swash_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, &queue, surface_format);
-        let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
-        
+        let text_renderer = TextRenderer::new(
+            &mut text_atlas,
+            &device,
+            wgpu::MultisampleState::default(),
+            None,
+        );
+
         let font_size = kterm_config.font.size;
         let line_height = font_size * 1.25;
 
         let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        let size = window.inner_size();
         text_buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
 
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -181,7 +190,7 @@ impl<'a> RenderState<'a> {
             },
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
-            multiview: None
+            multiview: None,
         });
 
         Self {
@@ -223,7 +232,7 @@ impl<'a> RenderState<'a> {
 
     pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
         let mut is_dirty = false;
-        
+
         {
             let mut current_state = self.terminal_state.write().unwrap();
 
@@ -254,7 +263,7 @@ impl<'a> RenderState<'a> {
                     let row = if offset > 0 && y < offset {
                         let sb_idx = scrollback_len.saturating_sub(offset).saturating_add(y);
                         &screen.scrollback[sb_idx]
-                    }else {
+                    } else {
                         &screen.grid[y.saturating_sub(offset)]
                     };
 
@@ -262,7 +271,7 @@ impl<'a> RenderState<'a> {
                         let is_cursor = offset == screen.cursor_x && y == screen.cursor_y;
                         let c = if is_cursor { '▒' } else { cell.c };
 
-                        if cell. bg != [18, 18, 18] {
+                        if cell.bg != [18, 18, 18] {
                             let left = margin_left + (x as f32 * font_width);
                             let right = left + font_width;
                             let top = margin_top + (y as f32 * font_height);
@@ -280,12 +289,12 @@ impl<'a> RenderState<'a> {
                             ];
 
                             self.bg_vertices.extend_from_slice(&[
-                                BgVertex { position: [ndc_l, ndc_t], color }, // Top-Left
-                                BgVertex { position: [ndc_l, ndc_b], color }, // Bottom-Left
-                                BgVertex { position: [ndc_r, ndc_t], color }, // Top-Right
-                                BgVertex { position: [ndc_r, ndc_t], color }, // Top-Right
-                                BgVertex { position: [ndc_l, ndc_b], color }, // Bottom-Left
-                                BgVertex { position: [ndc_r, ndc_b], color }, // Bottom-Right
+                                BgVertex { position: [ndc_l, ndc_t], color },
+                                BgVertex { position: [ndc_l, ndc_b], color },
+                                BgVertex { position: [ndc_r, ndc_t], color },
+                                BgVertex { position: [ndc_r, ndc_t], color },
+                                BgVertex { position: [ndc_l, ndc_b], color },
+                                BgVertex { position: [ndc_r, ndc_b], color },
                             ]);
                         }
 
@@ -318,15 +327,11 @@ impl<'a> RenderState<'a> {
                     Attrs::new()
                         .family(Family::Name(&font_family))
                         .weight(Weight(450))
-                        .color(Color::rgb(color[0], color[1], color[2]))
+                        .color(Color::rgb(color[0], color[1], color[2])),
                 )
             });
 
-            self.text_buffer.set_rich_text(
-                &mut self.font_system,
-                rich_text,
-                Shaping::Basic,
-            );
+            self.text_buffer.set_rich_text(&mut self.font_system, rich_text, Shaping::Basic);
 
             if !self.bg_vertices.is_empty() {
                 self.bg_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -339,27 +344,29 @@ impl<'a> RenderState<'a> {
             }
         }
 
-        self.text_renderer.prepare(
-            &self.device,
-            &self.queue,
-            &mut self.font_system,
-            &mut self.text_atlas,
-            Resolution { width: self.config.width, height: self.config.height },
-            [TextArea {
-                buffer: &self.text_buffer,
-                left: 10.0,
-                top: 10.0,
-                scale: 1.0,
-                bounds: TextBounds { 
-                    left: 0,
-                    top: 0,
-                    right: self.size.width as i32,
-                    bottom: self.size.height as i32,
-                },
-                default_color: Color::rgb(200, 200, 200),
-            }],
-            &mut self.swash_cache,
-        ).unwrap(); 
+        self.text_renderer
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.font_system,
+                &mut self.text_atlas,
+                Resolution { width: self.config.width, height: self.config.height },
+                [TextArea {
+                    buffer: &self.text_buffer,
+                    left: 10.0,
+                    top: 10.0,
+                    scale: 1.0,
+                    bounds: TextBounds {
+                        left: 0,
+                        top: 0,
+                        right: self.size.width as i32,
+                        bottom: self.size.height as i32,
+                    },
+                    default_color: Color::rgb(200, 200, 200),
+                }],
+                &mut self.swash_cache,
+            )
+            .unwrap();
 
         let output = self.surface.get_current_texture()?;
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
@@ -375,7 +382,10 @@ impl<'a> RenderState<'a> {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.07, g: 0.07, b: 0.07, a: 1.0,
+                            r: 0.07,
+                            g: 0.07,
+                            b: 0.07,
+                            a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -396,7 +406,6 @@ impl<'a> RenderState<'a> {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
-
         self.text_atlas.trim();
 
         Ok(())
