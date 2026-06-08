@@ -6,7 +6,7 @@ use glyphon::{
     TextAtlas, TextBounds, TextRenderer, Weight
 };
 
-use crate::state::buffer::TerminalState;
+use crate::state::{buffer::TerminalState, config::KtermConfig};
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -78,10 +78,11 @@ pub struct RenderState<'a> {
     bg_pipeline: wgpu::RenderPipeline,
     bg_vertices: Vec<BgVertex>,
     bg_buffer: Option<wgpu::Buffer>,
+    config_state: KtermConfig,
 }
 
 impl<'a> RenderState<'a> {
-    pub async fn new(window: Arc<Window>, terminal_state: Arc<RwLock<TerminalState>>) -> Self {
+    pub async fn new(window: Arc<Window>, terminal_state: Arc<RwLock<TerminalState>>, kterm_config: KtermConfig) -> Self {
         let size = window.inner_size();
 
         let instance = wgpu::Instance::default();
@@ -133,8 +134,11 @@ impl<'a> RenderState<'a> {
         let swash_cache = SwashCache::new();
         let mut text_atlas = TextAtlas::new(&device, &queue, surface_format);
         let text_renderer = TextRenderer::new(&mut text_atlas, &device, wgpu::MultisampleState::default(), None);
+        
+        let font_size = kterm_config.font.size;
+        let line_height = font_size * 1.25;
 
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(16.0, 20.0));
+        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
         let size = window.inner_size();
         text_buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
 
@@ -198,6 +202,7 @@ impl<'a> RenderState<'a> {
             bg_pipeline,
             bg_vertices: Vec::with_capacity(6000),
             bg_buffer: None,
+            config_state: kterm_config,
         }
     }
 
@@ -235,16 +240,26 @@ impl<'a> RenderState<'a> {
 
                 let mut current_color = [220, 220, 220];
                 let mut span_start = 0;
-                let font_width = 9.6_f32;
-                let font_height = 20.0_f32;
+                let font_width = self.config_state.font.size * 0.6;
+                let font_height = self.config_state.font.size * 1.25;
                 let margin_left = 10.0_f32;
                 let margin_top = 10.0_f32;
                 let win_w = self.size.width as f32;
                 let win_h = self.size.height as f32;
+                let offset = screen.scroll_offset;
+                let scrollback_len = screen.scrollback.len();
+                let visible_rows = screen.grid.len();
 
-                for (y, row) in screen.grid.iter().enumerate() {
+                for y in 0..visible_rows {
+                    let row = if offset > 0 && y < offset {
+                        let sb_idx = scrollback_len.saturating_sub(offset).saturating_add(y);
+                        &screen.scrollback[sb_idx]
+                    }else {
+                        &screen.grid[y.saturating_sub(offset)]
+                    };
+
                     for (x, cell) in row.iter().enumerate() {
-                        let is_cursor = x == screen.cursor_x && y == screen.cursor_y;
+                        let is_cursor = offset == screen.cursor_x && y == screen.cursor_y;
                         let c = if is_cursor { '▒' } else { cell.c };
 
                         if cell. bg != [18, 18, 18] {
@@ -296,11 +311,12 @@ impl<'a> RenderState<'a> {
         }
 
         if is_dirty {
+            let font_family = self.config_state.font.family.clone();
             let rich_text = self.color_spans.iter().map(|&(start, end, color)| {
                 (
                     &self.screen_text[start..end],
                     Attrs::new()
-                        .family(Family::Name("FiraCode Nerd Font"))
+                        .family(Family::Name(&font_family))
                         .weight(Weight(450))
                         .color(Color::rgb(color[0], color[1], color[2]))
                 )

@@ -2,6 +2,7 @@ mod pty;
 mod state;
 mod render;
 
+use arboard::Clipboard;
 use anyhow::Result;
 use state::buffer::TerminalState;
 use vte::Parser;
@@ -15,10 +16,19 @@ use winit::keyboard::{Key, NamedKey,ModifiersState};
 use render::engine::RenderState;
 use portable_pty::PtySize;
 
+use crate::state::config::KtermConfig;
+
 fn main() -> Result<()> {
     println!("[K-Term] Levantando subsistemas...");
+
+    let config = KtermConfig::load();
+    let def_fg = config.colors.foreground;
+    let def_bg = config.colors.background;
+
+    let font_width = config.font.size * 0.6;
+    let font_height = config.font.size * 1.25;
     
-    let terminal_state = Arc::new(RwLock::new(TerminalState::new(80, 24)));
+    let terminal_state = Arc::new(RwLock::new(TerminalState::new(80, 24, def_fg, def_bg)));
 
     let pty_process = pty::shell::spawn_interactive_shell()?;
     let mut writer = pty_process.writer;
@@ -46,7 +56,7 @@ fn main() -> Result<()> {
 
     let render_terminal_state = Arc::clone(&terminal_state);
 
-    let mut render_state = pollster::block_on(RenderState::new(Arc::clone(&window), render_terminal_state));
+    let mut render_state = pollster::block_on(RenderState::new(Arc::clone(&window), Arc::clone(&terminal_state), config.clone()));
 
     let mut modifiers = ModifiersState::default();
 
@@ -58,6 +68,18 @@ fn main() -> Result<()> {
             } if window_id == window.id() => {
                 match event {
                     WindowEvent::CloseRequested => elwt.exit(),
+
+                    WindowEvent::MouseWheel { delta, .. } => {
+                        let mut state = terminal_state.write().unwrap();
+                        match delta {
+                            winit::event::MouseScrollDelta::LineDelta(_, y) => {
+                                state.scroll(-(*y as isize) * 3);
+                            }
+                            winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                                state.scroll(-(pos.y as isize / 15)); 
+                            }
+                        }
+                    }
 
                     WindowEvent::Resized(physical_size) => {
                         render_state.resize(*physical_size);
@@ -109,7 +131,17 @@ fn main() -> Result<()> {
                                 Key::Named(NamedKey::ArrowLeft) => { let _ = writer.write_all(b"\x1b[D"); }
 
                                 Key::Character(c) => {
-                                    if modifiers.control_key() {
+                                    let char_str = c.as_str();
+                                    if modifiers.control_key() && modifiers.shift_key() && char_str.to_lowercase() == "v" {
+                                        if let Ok(mut clipboard) = Clipboard::new() {
+                                            if let Ok(text) = clipboard.get_text() {
+                                                let _ = writer.write_all(text.as_bytes());
+                                                let _ = writer.flush();
+                                            }
+                                        }
+                                    }else if modifiers.control_key() && modifiers.shift_key() && char_str.to_lowercase() == "c" {
+                                        println!("[K-Term] accion de copiar detectada")
+                                    }else if modifiers.control_key() {
                                         if let Some(char_str) = c.as_str().chars().next() {
                                             let ctr_char = (char_str.to_ascii_uppercase() as u8) & 0x1F;
                                             if ctr_char > 0 && ctr_char <= 31 {
