@@ -1,3 +1,5 @@
+use std::{isize, usize};
+
 use vte::Perform;
 
 #[derive(Clone, Copy)]
@@ -32,71 +34,99 @@ pub struct Screen {
     pub grid: Vec<Vec<Cell>>,
     pub cursor_x: usize,
     pub cursor_y: usize,
+    pub scrollback: Vec<Vec<Cell>>,
+    pub scroll_offset: usize,
 }
 
 impl Screen {
-    pub fn new(cols: usize, rows: usize) -> Self {
-        let empty_cell = Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG };
+    pub fn new(cols: usize, rows: usize, def_fg: [u8; 3], def_bg: [u8; 3]) -> Self {
+        let empty_cell = Cell { c: ' ', fg: def_fg, bg: def_bg };
         Self {
             grid: vec![vec![empty_cell; cols]; rows],
             cursor_x: 0,
             cursor_y: 0,
+            scrollback: Vec::with_capacity(10000),
+            scroll_offset: 0,
         }
     }
 
-    pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
-        self.grid.resize(new_rows, vec![Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG }; new_cols]);
+    pub fn resize(&mut self, new_cols: usize, new_rows: usize, def_fg: [u8; 3], def_bg: [u8; 3]) {
+        self.grid.resize(new_rows, vec![Cell { c: ' ', fg: def_fg, bg: def_bg }; new_cols]);
 
         for row in &mut self.grid {
-            row.resize(new_cols, Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG });
+            row.resize(new_cols, Cell { c: ' ', fg: def_fg, bg: def_bg });
         }
 
         self.cursor_x = self.cursor_x.min(new_cols.saturating_sub(1));
         self.cursor_y = self.cursor_y.min(new_rows.saturating_sub(1));
     }
 
-    fn scroll_up(&mut self, cols: usize) {
-        self.grid.remove(0);
-        self.grid.push(vec![Cell { c: ' ', fg: DEFAULT_FG, bg: DEFAULT_BG }; cols]);
+    fn scroll_up(&mut self, cols: usize, def_fg: [u8; 3], def_bg: [u8; 3]) {
+        let removed_row = self.grid.remove(0);
+        self.scrollback.push(removed_row);
+
+        if self.scrollback.len() > 10000 {
+            self.scrollback.remove(0);
+        }
+
+        self.grid.push(vec![Cell { c: ' ', fg: def_fg, bg: def_bg }; cols]);
     }
 }
 
 pub struct TerminalState {
-    pub cols: usize,
-    pub rows: usize,
-    pub primary: Screen,  
-    pub alt: Screen,    
-    pub use_alt_screen: bool, 
-    pub dirty: bool,
-    pub current_fg: [u8; 3],
-    pub current_bg: [u8; 3],
+    pub cols: usize, pub rows: usize,
+    pub primary: Screen,  pub alt: Screen,    
+    pub use_alt_screen: bool, pub dirty: bool,
+    pub current_fg: [u8; 3], pub current_bg: [u8; 3],
+    pub default_fg: [u8; 3], pub default_bg: [u8; 3],
 }
 
 impl TerminalState {
-    pub fn new(cols: usize, rows: usize) -> Self {
+    pub fn new(cols: usize, rows: usize, def_fg: [u8; 3], def_bg: [u8; 3]) -> Self {
         Self { 
-            cols,
-            rows,
-            primary: Screen::new(cols, rows),
-            alt: Screen::new(cols, rows),
-            use_alt_screen: false,
-            dirty: true,
-            current_fg: DEFAULT_FG,
-            current_bg: DEFAULT_BG,
+            cols, rows,
+            primary: Screen::new(cols, rows, def_fg, def_bg),
+            alt: Screen::new(cols, rows, def_fg, def_bg),
+            use_alt_screen: false, dirty: true,
+            current_fg: def_fg, current_bg: def_bg,
+            default_fg: def_fg, default_bg: def_bg
         }
     }
 
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
         self.cols = new_cols;
         self.rows = new_rows;
-        self.primary.resize(new_cols, new_rows);
-        self.alt.resize(new_cols, new_rows);
+        self.primary.resize(new_cols, new_rows, self.default_fg, self.default_bg);
+        self.alt.resize(new_cols, new_rows, self.default_fg, self.default_bg);
         self.dirty = true;
+    }
+
+    pub fn scroll(&mut self, lines: isize) {
+        if self.use_alt_screen { return; }
+
+        let max_offset = self.primary.scrollback.len();
+        let current = self.primary.scroll_offset as isize;
+
+        let new_offset = (current + lines).clamp(0, max_offset as isize) as usize;
+
+        if new_offset != self.primary.scroll_offset {
+            self.primary.scroll_offset = new_offset;
+            self.dirty = true;
+        }
+    }
+
+    pub fn snap_to_bottom(&mut self) {
+        if self.primary.scroll_offset > 0 {
+            self.primary.scroll_offset = 0;
+            self.dirty = true;
+        }
     }
 }
 
 impl Perform for TerminalState {
     fn print(&mut self, c: char) {
+        self.snap_to_bottom();
+
         let cols = self.cols;
         let rows = self.rows;
         let fg = self.current_fg;
@@ -116,7 +146,7 @@ impl Perform for TerminalState {
             if screen.cursor_y < rows - 1 {
                 screen.cursor_y += 1;
             } else {
-                screen.scroll_up(cols);
+                screen.scroll_up(cols, self. default_fg, self.default_bg);
             }
         }
 
@@ -124,6 +154,8 @@ impl Perform for TerminalState {
     }
 
     fn execute(&mut self, byte: u8) {
+        self.snap_to_bottom();
+
         let rows = self.rows;
         let cols = self.cols;
         let screen = if self.use_alt_screen { &mut self.alt } else { &mut self.primary };
@@ -133,7 +165,7 @@ impl Perform for TerminalState {
                 if screen.cursor_y < rows - 1 {
                     screen.cursor_y += 1;
                 } else {
-                    screen.scroll_up(cols);
+                    screen.scroll_up(cols, self.default_fg, self.default_bg);
                 }
             }
             13 => screen.cursor_x = 0, // \r
@@ -164,7 +196,7 @@ impl Perform for TerminalState {
                     for mode in args {
                         if mode == 1049 {
                             self.use_alt_screen = true;
-                            self.alt = Screen::new(self.cols, self.rows);
+                            self.alt = Screen::new(self.cols, self.rows, self.default_fg, self.default_bg);
                         }
                     }
                     self.dirty = true;
