@@ -113,8 +113,8 @@ impl Terminal {
     pub fn resize(&mut self, new_cols: usize, new_rows: usize) {
         self.cols = new_cols;
         self.rows = new_rows;
-        self.primary.resize(new_cols, new_rows, self.default_fg, self.default_bg);
-        self.alt.resize(new_cols, new_rows, self.default_fg, self.default_bg);
+        self.primary.reflow(new_cols, new_rows, self.default_fg, self.default_bg);
+        self.alt.reflow(new_cols, new_rows, self.default_fg, self.default_bg);
         self.dirty = true;
     }
 
@@ -212,6 +212,7 @@ impl Perform for Terminal {
 
         if self.pending_wrap {
             self.pending_wrap = false;
+            screen.visible[screen.cursor_y].is_wrapped = true;
             screen.cursor_x = 0;
             if screen.cursor_y < rows - 1 {
                 screen.cursor_y += 1;
@@ -221,6 +222,7 @@ impl Perform for Terminal {
         }
 
         if screen.cursor_x + char_width > cols {
+            screen.visible[screen.cursor_y].is_wrapped = true;
             screen.cursor_x = 0;
             if screen.cursor_y < rows - 1 {
                 screen.cursor_y += 1;
