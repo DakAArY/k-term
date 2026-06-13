@@ -1,12 +1,15 @@
-use std::sync::{Arc, RwLock};
+use std::collections::HashMap;
+use std::f32;
+use std::sync::Arc;
 use winit::window::Window;
 use wgpu::util::DeviceExt;
 use glyphon::{
-    Attrs, Buffer, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
-    TextAtlas, TextBounds, TextRenderer, Weight,
+    Attrs, Buffer as TextBuffer, Cache, Color, Family, FontSystem, Metrics, Resolution, Shaping, SwashCache, TextArea,
+    TextAtlas, TextBounds, TextRenderer, Viewport, Weight,
 };
 
-use crate::state::{buffer::TerminalState, config::KtermConfig};
+use crate::config::KtermConfig;
+use crate::terminal::state::Terminal;
 
 #[repr(C)]
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
@@ -58,36 +61,34 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 ";
 
-pub struct RenderState<'a> {
-    surface: wgpu::Surface<'a>,
+pub struct RenderState {
+    surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
     pub size: winit::dpi::PhysicalSize<u32>,
-    window: Arc<Window>,
     font_system: FontSystem,
     swash_cache: SwashCache,
+    viewport: Viewport,
+    cache: Cache,
     text_atlas: TextAtlas,
     text_renderer: TextRenderer,
-    terminal_state: Arc<RwLock<TerminalState>>,
-    text_buffer: Buffer,
-    screen_text: String,
-    color_spans: Vec<(usize, usize, [u8; 3])>,
+    
+    glyph_cache: HashMap<char, TextBuffer>,
+    
     bg_pipeline: wgpu::RenderPipeline,
     bg_vertices: Vec<BgVertex>,
-    bg_buffer: Option<wgpu::Buffer>,
-    config_state: KtermConfig,
+    pub bg_buffer: Option<wgpu::Buffer>,
+    pub config_state: KtermConfig,
+    pub exact_font_width: f32,
+    pub exact_font_height: f32,
 }
 
-impl<'a> RenderState<'a> {
-    pub async fn new(
-        window: Arc<Window>,
-        terminal_state: Arc<RwLock<TerminalState>>,
-        kterm_config: KtermConfig,
-    ) -> Self {
+impl RenderState {
+    pub async fn new(window: Arc<Window>, kterm_config: KtermConfig) -> Self {
         let size = window.inner_size();
         let instance = wgpu::Instance::default();
-        let surface = instance.create_surface(Arc::clone(&window)).unwrap();
+        let surface = instance.create_surface(window).unwrap();
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -104,6 +105,7 @@ impl<'a> RenderState<'a> {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     label: None,
+                    memory_hints: wgpu::MemoryHints::Performance,
                 },
                 None,
             )
@@ -128,7 +130,6 @@ impl<'a> RenderState<'a> {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-
         surface.configure(&device, &config);
 
         let mut db = glyphon::fontdb::Database::new();
@@ -137,7 +138,28 @@ impl<'a> RenderState<'a> {
         let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), db);
 
         let swash_cache = SwashCache::new();
-        let mut text_atlas = TextAtlas::new(&device, &queue, surface_format);
+        let font_size = kterm_config.font.size;
+        let line_height = (font_size * 1.2).ceil();
+
+        let mut measure_buf = TextBuffer::new(&mut font_system, Metrics::new(font_size, line_height));
+        measure_buf.set_size(&mut font_system, None, None);
+        measure_buf.set_text(
+            &mut font_system,
+            "W", 
+            Attrs::new()
+                .family(Family::Name(&kterm_config.font.family))
+                .weight(Weight(400)),
+            Shaping::Advanced,
+        );
+        
+        let exact_font_width = measure_buf.layout_runs().next().map(|run| run.line_w).unwrap_or(font_size * 0.6);
+        let exact_font_height = line_height;
+        
+        let cache = Cache::new(&device);
+        let mut viewport = Viewport::new(&device, &cache);
+        viewport.update(&queue, Resolution { width: size.width, height: size.height });
+
+        let mut text_atlas = TextAtlas::new(&device, &queue, &cache, surface_format);
         let text_renderer = TextRenderer::new(
             &mut text_atlas,
             &device,
@@ -145,23 +167,17 @@ impl<'a> RenderState<'a> {
             None,
         );
 
-        let font_size = kterm_config.font.size;
-        let line_height = font_size * 1.25;
-
-        let mut text_buffer = Buffer::new(&mut font_system, Metrics::new(font_size, line_height));
-        text_buffer.set_size(&mut font_system, size.width as f32, size.height as f32);
-
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Background Shader"),
             source: wgpu::ShaderSource::Wgsl(BG_SHADER.into()),
         });
-
+        
         let bg_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("BG Pipeline Layout"),
             bind_group_layouts: &[],
             push_constant_ranges: &[],
         });
-
+        
         let bg_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("BG Render Pipeline"),
             layout: Some(&bg_pipeline_layout),
@@ -169,6 +185,7 @@ impl<'a> RenderState<'a> {
                 module: &shader,
                 entry_point: "vs_main",
                 buffers: &[BgVertex::desc()],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             },
             fragment: Some(wgpu::FragmentState {
                 module: &shader,
@@ -178,6 +195,7 @@ impl<'a> RenderState<'a> {
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
             }),
             primitive: wgpu::PrimitiveState {
                 topology: wgpu::PrimitiveTopology::TriangleList,
@@ -191,6 +209,7 @@ impl<'a> RenderState<'a> {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview: None,
+            cache: None,
         });
 
         Self {
@@ -199,150 +218,168 @@ impl<'a> RenderState<'a> {
             queue,
             config,
             size,
-            window,
             font_system,
             swash_cache,
+            viewport,
+            cache,
             text_atlas,
             text_renderer,
-            terminal_state,
-            text_buffer,
-            screen_text: String::with_capacity(15000),
-            color_spans: Vec::with_capacity(1000),
+            glyph_cache: HashMap::new(),
             bg_pipeline,
             bg_vertices: Vec::with_capacity(6000),
             bg_buffer: None,
             config_state: kterm_config,
+            exact_font_width,
+            exact_font_height,
         }
     }
 
     pub fn resize(&mut self, new_size: winit::dpi::PhysicalSize<u32>) {
         if new_size.width > 0 && new_size.height > 0 {
+            if new_size.width == self.config.width && new_size.height == self.config.height {
+                return;
+            }
             self.size = new_size;
             self.config.width = new_size.width;
             self.config.height = new_size.height;
             self.surface.configure(&self.device, &self.config);
-
-            self.text_buffer.set_size(
-                &mut self.font_system,
-                new_size.width as f32,
-                new_size.height as f32,
+            self.viewport.update(
+                &self.queue,
+                Resolution { width: new_size.width, height: new_size.height },
             );
         }
     }
 
-    pub fn render(&mut self) -> Result<(), wgpu::SurfaceError> {
-        let mut is_dirty = false;
+    pub fn render(&mut self, terminal: &mut Terminal) -> Result<(), wgpu::SurfaceError> {
+        let win_w = self.size.width as f32;
+        let win_h = self.size.height as f32;
+        if win_w == 0.0 || win_h == 0.0 {
+            return Ok(());
+        }
 
-        {
-            let mut current_state = self.terminal_state.write().unwrap();
+        let font_width  = self.exact_font_width;
+        let font_height = self.exact_font_height;
+        let margin_left = 10.0_f32;
+        let margin_top  = 10.0_f32;
 
-            if current_state.dirty {
-                self.screen_text.clear();
-                self.color_spans.clear();
-                self.bg_vertices.clear();
+        let cols       = terminal.cols;
+        let rows       = terminal.rows;
+        let default_bg = self.config_state.colors.background;
+        let font_family = self.config_state.font.family.clone();
+        let font_size = self.config_state.font.size;
 
-                let screen = if current_state.use_alt_screen {
-                    &current_state.alt
-                } else {
-                    &current_state.primary
-                };
+        self.bg_vertices.clear();
 
-                let mut current_color = [220, 220, 220];
-                let mut span_start = 0;
-                let font_width = self.config_state.font.size * 0.6;
-                let font_height = self.config_state.font.size * 1.25;
-                let margin_left = 10.0_f32;
-                let margin_top = 10.0_f32;
-                let win_w = self.size.width as f32;
-                let win_h = self.size.height as f32;
-                let offset = screen.scroll_offset;
-                let scrollback_len = screen.scrollback.len();
-                let visible_rows = screen.grid.len();
+        let mut missing_chars = Vec::new();
+        for y in 0..rows {
+            for x in 0..cols {
+                let c = terminal.get_cell(x, y).c;
+                if c != ' ' && c != '\0' && !self.glyph_cache.contains_key(&c) {
+                    missing_chars.push(c);
+                }
+            }
+        }
+        
+        missing_chars.sort_unstable();
+        missing_chars.dedup();
 
-                for y in 0..visible_rows {
-                    let row = if offset > 0 && y < offset {
-                        let sb_idx = scrollback_len.saturating_sub(offset).saturating_add(y);
-                        &screen.scrollback[sb_idx]
-                    } else {
-                        &screen.grid[y.saturating_sub(offset)]
-                    };
+        for c in missing_chars {
+            let mut buf = TextBuffer::new(&mut self.font_system, Metrics::new(font_size, font_height));
+            buf.set_size(&mut self.font_system, None, None);
+            buf.set_text(
+                &mut self.font_system,
+                &c.to_string(),
+                Attrs::new()
+                    .family(Family::Name(&font_family))
+                    .weight(Weight(400)),
+                Shaping::Advanced, 
+            );
+            buf.shape_until_scroll(&mut self.font_system, false);
+            self.glyph_cache.insert(c, buf);
+        }
 
-                    for (x, cell) in row.iter().enumerate() {
-                        let is_cursor = offset == screen.cursor_x && y == screen.cursor_y;
-                        let c = if is_cursor { '▒' } else { cell.c };
+        let mut text_areas = Vec::new();
 
-                        if cell.bg != [18, 18, 18] {
-                            let left = margin_left + (x as f32 * font_width);
-                            let right = left + font_width;
-                            let top = margin_top + (y as f32 * font_height);
-                            let bottom = top + font_height;
+        for y in 0..rows {
+            let row_top = margin_top + y as f32 * font_height;
+            
+            for x in 0..cols {
+                let cell = terminal.get_cell(x, y);
+                let is_cursor = terminal.is_cursor(x, y) && !terminal.hide_cursor;
 
-                            let ndc_l = (left / win_w) * 2.0 - 1.0;
-                            let ndc_r = (right / win_w) * 2.0 - 1.0;
-                            let ndc_t = 1.0 - (top / win_h) * 2.0;
-                            let ndc_b = 1.0 - (bottom / win_h) * 2.0;
+                let mut fg = cell.fg;
+                let mut bg = cell.bg;
 
-                            let color = [
-                                cell.bg[0] as f32 / 255.0,
-                                cell.bg[1] as f32 / 255.0,
-                                cell.bg[2] as f32 / 255.0,
-                            ];
-
-                            self.bg_vertices.extend_from_slice(&[
-                                BgVertex { position: [ndc_l, ndc_t], color },
-                                BgVertex { position: [ndc_l, ndc_b], color },
-                                BgVertex { position: [ndc_r, ndc_t], color },
-                                BgVertex { position: [ndc_r, ndc_t], color },
-                                BgVertex { position: [ndc_l, ndc_b], color },
-                                BgVertex { position: [ndc_r, ndc_b], color },
-                            ]);
-                        }
-
-                        if cell.fg != current_color {
-                            if self.screen_text.len() > span_start {
-                                self.color_spans.push((span_start, self.screen_text.len(), current_color));
-                            }
-                            current_color = cell.fg;
-                            span_start = self.screen_text.len();
-                        }
-                        self.screen_text.push(c);
+                if is_cursor {
+                    std::mem::swap(&mut fg, &mut bg);
+                    if fg == bg {
+                        fg = default_bg;
+                        bg = self.config_state.colors.foreground;
                     }
-                    self.screen_text.push('\n');
                 }
 
-                if self.screen_text.len() > span_start {
-                    self.color_spans.push((span_start, self.screen_text.len(), current_color));
+                if bg != default_bg || is_cursor {
+                    let left   = (margin_left + x as f32 * font_width).floor();
+                    let right  = (margin_left + (x + 1) as f32 * font_width).ceil();
+                    let top    = row_top.floor();
+                    let bottom = (row_top + font_height).ceil();
+
+                    let ndc_l = (left   / win_w) * 2.0 - 1.0;
+                    let ndc_r = (right  / win_w) * 2.0 - 1.0;
+                    let ndc_t = 1.0 - (top    / win_h) * 2.0;
+                    let ndc_b = 1.0 - (bottom / win_h) * 2.0;
+
+                    let c_color = [
+                        bg[0] as f32 / 255.0,
+                        bg[1] as f32 / 255.0,
+                        bg[2] as f32 / 255.0,
+                    ];
+                    
+                    self.bg_vertices.extend_from_slice(&[
+                        BgVertex { position: [ndc_l, ndc_t], color: c_color },
+                        BgVertex { position: [ndc_l, ndc_b], color: c_color },
+                        BgVertex { position: [ndc_r, ndc_t], color: c_color },
+                        BgVertex { position: [ndc_r, ndc_t], color: c_color },
+                        BgVertex { position: [ndc_l, ndc_b], color: c_color },
+                        BgVertex { position: [ndc_r, ndc_b], color: c_color },
+                    ]);
                 }
 
-                current_state.dirty = false;
-                is_dirty = true;
+                if cell.c != ' ' && cell.c != '\0' {
+                    let left_f = margin_left + x as f32 * font_width;
+                    let top_f = margin_top + y as f32 * font_height;
+                    
+                    if let Some(cached_buffer) = self.glyph_cache.get(&cell.c) {
+                        text_areas.push(TextArea {
+                            buffer: cached_buffer,
+                            left: left_f,
+                            top: top_f,
+                            scale: 1.0,
+                            bounds: TextBounds {
+                                left: 0,
+                                top: 0,
+                                right: win_w as i32,
+                                bottom: win_h as i32,
+                            },
+                            default_color: Color::rgb(fg[0], fg[1], fg[2]),
+                            custom_glyphs: &[],
+                        });
+                    }
+                }
             }
         }
 
-        if is_dirty {
-            let font_family = self.config_state.font.family.clone();
-            let rich_text = self.color_spans.iter().map(|&(start, end, color)| {
-                (
-                    &self.screen_text[start..end],
-                    Attrs::new()
-                        .family(Family::Name(&font_family))
-                        .weight(Weight(450))
-                        .color(Color::rgb(color[0], color[1], color[2])),
-                )
-            });
+        self.bg_buffer = if !self.bg_vertices.is_empty() {
+            Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("BG Vertex Buffer"),
+                contents: bytemuck::cast_slice(&self.bg_vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            }))
+        } else {
+            None
+        };
 
-            self.text_buffer.set_rich_text(&mut self.font_system, rich_text, Shaping::Basic);
-
-            if !self.bg_vertices.is_empty() {
-                self.bg_buffer = Some(self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("BG Vertex Buffer"),
-                    contents: bytemuck::cast_slice(&self.bg_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                }));
-            } else {
-                self.bg_buffer = None;
-            }
-        }
+        terminal.dirty = false;
 
         self.text_renderer
             .prepare(
@@ -350,26 +387,14 @@ impl<'a> RenderState<'a> {
                 &self.queue,
                 &mut self.font_system,
                 &mut self.text_atlas,
-                Resolution { width: self.config.width, height: self.config.height },
-                [TextArea {
-                    buffer: &self.text_buffer,
-                    left: 10.0,
-                    top: 10.0,
-                    scale: 1.0,
-                    bounds: TextBounds {
-                        left: 0,
-                        top: 0,
-                        right: self.size.width as i32,
-                        bottom: self.size.height as i32,
-                    },
-                    default_color: Color::rgb(200, 200, 200),
-                }],
+                &self.viewport,
+                text_areas,
                 &mut self.swash_cache,
             )
             .unwrap();
 
         let output = self.surface.get_current_texture()?;
-        let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let view   = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Render Encoder"),
         });
@@ -381,11 +406,14 @@ impl<'a> RenderState<'a> {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.07,
-                            g: 0.07,
-                            b: 0.07,
-                            a: 1.0,
+                        load: wgpu::LoadOp::Clear({
+                            let bg = self.config_state.colors.background;
+                            wgpu::Color {
+                                r: bg[0] as f64 / 255.0,
+                                g: bg[1] as f64 / 255.0,
+                                b: bg[2] as f64 / 255.0,
+                                a: 1.0,
+                            }
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -401,7 +429,9 @@ impl<'a> RenderState<'a> {
                 render_pass.draw(0..self.bg_vertices.len() as u32, 0..1);
             }
 
-            self.text_renderer.render(&self.text_atlas, &mut render_pass).unwrap();
+            self.text_renderer
+                .render(&self.text_atlas, &self.viewport, &mut render_pass)
+                .unwrap();
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -409,5 +439,18 @@ impl<'a> RenderState<'a> {
         self.text_atlas.trim();
 
         Ok(())
+    }
+
+    pub fn get_glyph_dimensions(&mut self, font_size: f32) -> (f32, f32) {
+        let line_height = font_size * 1.2;
+        let metrics = Metrics::new(font_size, line_height);
+        let mut measure_buffer = TextBuffer::new(&mut self.font_system, metrics);
+
+        measure_buffer.set_size(&mut self.font_system, None, None);
+        measure_buffer.set_text(&mut self.font_system, "W", Attrs::new(), Shaping::Advanced);
+        
+        let width = measure_buffer.layout_runs().next().map(|run| run.line_w).unwrap_or(font_size * 0.6);
+
+        (width, line_height)
     }
 }

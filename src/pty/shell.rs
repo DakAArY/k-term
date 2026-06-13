@@ -1,5 +1,6 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use std::env;
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
@@ -20,7 +21,9 @@ pub fn spawn_interactive_shell() -> Result<PtyProcess> {
         pixel_height: 0,
     })?;
 
-    let mut cmd = CommandBuilder::new("bash");
+    let shell_path = env::var("SHELL").unwrap_or_else(|_| "/bin/bash".to_string());
+
+    let mut cmd = CommandBuilder::new(shell_path);
     cmd.env("TERM", "xterm-256color");
     let _child = pty_pair.slave.spawn_command(cmd)?;
 
