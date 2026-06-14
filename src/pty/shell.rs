@@ -1,12 +1,9 @@
 use anyhow::Result;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::env;
-use std::io::{Read, Write};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::thread;
+use std::io::Write;
 
 pub struct PtyProcess {
-    pub receiver: Receiver<Vec<u8>>,
     pub writer: Box<dyn Write + Send>,
     pub master: Box<dyn MasterPty + Send>,
 }
@@ -14,7 +11,7 @@ pub struct PtyProcess {
 pub fn spawn_interactive_shell() -> Result<PtyProcess> {
     let pty_system = native_pty_system();
 
-    let pty_pair = pty_system.openpty(PtySize {
+    let pty_pair = pty_system.openpty(PtySize { 
         rows: 24,
         cols: 80,
         pixel_width: 0,
@@ -28,29 +25,9 @@ pub fn spawn_interactive_shell() -> Result<PtyProcess> {
     let _child = pty_pair.slave.spawn_command(cmd)?;
 
     drop(pty_pair.slave);
-
-    let mut reader = pty_pair.master.try_clone_reader()?;
     let writer = pty_pair.master.take_writer()?;
 
-    let (tx, rx): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = mpsc::channel();
-
-    thread::spawn(move || {
-        let mut buffer = [0u8; 1024];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => {
-                    if tx.send(buffer[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
-            }
-        }
-    });
-
-    Ok(PtyProcess {
-        receiver: rx,
+    Ok(PtyProcess { 
         writer,
         master: pty_pair.master,
     })

@@ -1,7 +1,8 @@
 use anyhow::Result;
 use portable_pty::{MasterPty, PtySize};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 use vte::Parser;
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
@@ -17,7 +18,7 @@ use crate::terminal::state::Terminal;
 
 #[derive(Debug)]
 pub enum AppEvent {
-    PtyData(Vec<u8>),
+    Wakeup, 
 }
 
 struct KTermApp {
@@ -25,6 +26,7 @@ struct KTermApp {
     terminal: Terminal,
     master_pty: Box<dyn MasterPty + Send>,
     writer: Box<dyn std::io::Write + Send>,
+    pty_buffer: Arc<Mutex<Vec<u8>>>,
     parser: Parser,
     app_mode: AppMode,
     modifiers: ModifiersState,
@@ -36,14 +38,22 @@ impl ApplicationHandler<AppEvent> for KTermApp {
     
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::PtyData(bytes) => {
-                for byte in bytes {
-                    self.parser.advance(&mut self.terminal, byte);
-                }
-                self.terminal.dirty = true;
+            AppEvent::Wakeup => {
+                // Tomamos todo el texto pendiente y vaciamos el búfer instantáneamente
+                // Esto destraba el hilo del PTY en menos de 1 microsegundo.
+                let mut b = self.pty_buffer.lock().unwrap();
+                let data = std::mem::take(&mut *b);
+                drop(b); 
                 
-                if let Some(window) = self.window.as_ref() {
-                    window.request_redraw(); 
+                if !data.is_empty() {
+                    for byte in data {
+                        self.parser.advance(&mut self.terminal, byte);
+                    }
+                    self.terminal.dirty = true;
+                    
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw(); 
+                    }
                 }
             }
         }
@@ -53,7 +63,9 @@ impl ApplicationHandler<AppEvent> for KTermApp {
         if self.window.is_none() {
             let window_attributes = Window::default_attributes()
                 .with_title("k-term")
+                .with_maximized(true) // Arranca maximizado para un reflow perfecto
                 .with_transparent(true);
+                
             let window = Arc::new(event_loop.create_window(window_attributes).unwrap());
             self.window = Some(window.clone());
 
@@ -86,7 +98,7 @@ impl ApplicationHandler<AppEvent> for KTermApp {
 
                     self.terminal.resize(new_cols, new_rows);
                     
-                    let _ = self.master_pty.resize(portable_pty::PtySize {
+                    let _ = self.master_pty.resize(PtySize {
                         cols: new_cols as u16,
                         rows: new_rows as u16,
                         pixel_width: physical_size.width as u16,
@@ -98,6 +110,25 @@ impl ApplicationHandler<AppEvent> for KTermApp {
                     window.request_redraw();
                 }
             }
+            
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines_to_scroll = match delta {
+                    MouseScrollDelta::LineDelta(_x, y) => {
+                        (y * 3.0).round() as isize
+                    }
+                    MouseScrollDelta::PixelDelta(pos) => {
+                        (pos.y / 15.0).round() as isize
+                    }
+                };
+
+                if lines_to_scroll != 0 {
+                    self.terminal.scroll(lines_to_scroll);
+                    if let Some(window) = self.window.as_ref() {
+                        window.request_redraw();
+                    }
+                }
+            }
+
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state == ElementState::Pressed {
@@ -138,18 +169,36 @@ pub fn run() -> Result<()> {
     let pty_process = spawn_interactive_shell()?;
     let writer = pty_process.writer;
     let master_pty = pty_process.master;
-    let receiver = pty_process.receiver;
+    let mut reader = master_pty.try_clone_reader()?;
+
+
+    let pty_buffer = Arc::new(Mutex::new(Vec::with_capacity(1024 * 1024)));
+    let pty_buffer_clone = pty_buffer.clone();
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build().unwrap();
-    
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let proxy = event_loop.create_proxy();
 
+
     thread::spawn(move || {
-        for bytes in receiver {
-            if proxy.send_event(AppEvent::PtyData(bytes)).is_err() {
-                break;
+        let mut local_buf = [0u8; 8192];
+        loop {
+            match reader.read(&mut local_buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    let mut b = pty_buffer_clone.lock().unwrap();
+                    b.extend_from_slice(&local_buf[..n]);
+                    
+                    let _ = proxy.send_event(AppEvent::Wakeup);
+
+                    while b.len() > 1024 * 1024 {
+                        drop(b);
+                        thread::sleep(Duration::from_millis(5));
+                        b = pty_buffer_clone.lock().unwrap();     
+                    }
+                }
+                Err(_) => break,
             }
         }
     });
@@ -159,6 +208,7 @@ pub fn run() -> Result<()> {
         terminal,
         master_pty,
         writer,
+        pty_buffer,
         parser: Parser::new(),
         app_mode: AppMode::Terminal,
         modifiers: ModifiersState::default(),
